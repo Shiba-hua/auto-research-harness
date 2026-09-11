@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# harness 控制入口：supervisor 的唯一操作面（供人/工具调用，避免 pgrep 自匹配）
+exec /usr/bin/supervisorctl -c /root/dsh-harness/supervisord.conf "$@"

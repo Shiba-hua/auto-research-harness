@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# 值班员上线器：MiniCPM5-2B 的 llama-server 是在 PRoot 里用 gcc-11 编的，
+# 需要 GLIBC>=2.34（宿主只有 2.27），所以复用 vLLM 那个 Ubuntu 22.04 userspace rootfs。
+set -euo pipefail
+RR=${RLVR_VLLM_RUNTIME_ROOT:-/root/siton-tmp/rlvr-vllm0102-userspace-v3}
+LC=${LLAMA_CPP_ROOT:-/root/llama.cpp}
+exec "$RR/bin/proot" -0 -r "$RR/rootfs" \
+  -b /dev -b /proc -b /sys -b /etc/resolv.conf -b /etc/hosts \
+  -b "$LC:$LC" \
+  -b /dev/shm:/dev/shm \
+  -w /dev/shm \
+  /usr/bin/env -i PATH=/usr/bin:/bin \
+    LD_LIBRARY_PATH="$LC/build-cpu/bin" \
+    LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+  "$LC/build-cpu/bin/llama-server" "$@"

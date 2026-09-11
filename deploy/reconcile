@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# 让 supervisord 成为唯一所有者：杀掉不在 supervisor 管理下的旧实例，再重启受管程序。
+# 用脚本文件执行，避免命令行含匹配串导致 pgrep 自匹配。
+set -u
+D=/root/dsh-harness
+HCTL="$D/bin/hctl"
+
+kill_by_cmd() {
+  local pat="$1" label="$2"
+  local pids
+  pids=$(ps -eo pid,cmd | awk -v p="$pat" "\$0 ~ p {print \$1}")
+  if [ -n "$pids" ]; then
+    echo "  停掉旧 $label: $(echo $pids | tr "\n" " ")"
+    kill -TERM $pids 2>/dev/null || true
+  fi
+}
+
+# 旧的手工实例：proot 包装 + 真正的服务进程
+kill_by_cmd "/dsh-harness/bin/guard-run" "guard-wrapper"
+kill_by_cmd "llama.cpp/build-cpu/bin/llama-server" "llama-server"
+kill_by_cmd "/dsh-harness/bin/vllm-run" "vllm-wrapper"
+kill_by_cmd "rlvr-vllm-venv/bin/vllm serve" "vllm-serve"
+sleep 12
+echo "  显存: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
+echo "  残留: $(ps -eo cmd | grep -cE "[l]lama-server|[v]llm serve")"
+echo "=== 让 supervisor 接管 ==="
+$HCTL reread >/dev/null 2>&1
+$HCTL update >/dev/null 2>&1
+$HCTL restart guard 2>&1 | head -2

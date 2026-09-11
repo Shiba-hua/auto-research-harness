@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# DSH harness wrapper around codex's vLLM userspace launcher.
+#
+# Mirrors /root/siton-tmp/rlvr-vllm0102-userspace-v3/bin/run and adds exactly ONE bind:
+#     /dev/shm/models -> /models      (45G tmpfs; siton-tmp has only 18G,
+#                                      and /root/siton-pub is mounted READ-ONLY by the platform)
+#
+# NOTE: /dev/shm is VOLATILE -- its contents are lost on host reboot.
+# codex's launcher, venv and rootfs are NOT modified.
+# See docs/09-研究员推理栈方案.md §2.2
+set -euo pipefail
+
+RLVR_VLLM_RUNTIME_ROOT=${RLVR_VLLM_RUNTIME_ROOT:-/root/siton-tmp/rlvr-vllm0102-userspace-v3}
+RLVR_LAB_ROOT=${RLVR_LAB_ROOT:-/root/siton-tmp/rlvr-l40s-lab}
+RLVR_BASE_PREFIX=${RLVR_BASE_PREFIX:-/root/vllm018-conda}
+MODELS_HOST=${MODELS_HOST:-/dev/shm/models}
+
+[[ $# -gt 0 ]] || { echo "Supply a guest command." >&2; exit 2; }
+
+OPTIONAL_ENV=()
+[[ -n "${HF_ENDPOINT:-}" ]] && OPTIONAL_ENV+=("HF_ENDPOINT=$HF_ENDPOINT")
+[[ -n "${VLLM_USE_V1:-}" ]] && OPTIONAL_ENV+=("VLLM_USE_V1=$VLLM_USE_V1")
+
+MODELS_BIND=()
+[[ -d "$MODELS_HOST" ]] && MODELS_BIND=(-b "$MODELS_HOST:/models")
+
+exec "$RLVR_VLLM_RUNTIME_ROOT/bin/proot" -0 -r "$RLVR_VLLM_RUNTIME_ROOT/rootfs" \
+  -b "$RLVR_VLLM_RUNTIME_ROOT/rootfs:$RLVR_VLLM_RUNTIME_ROOT/rootfs" \
+  -b /dev -b /proc -b /sys -b /etc/resolv.conf -b /etc/hosts \
+  -b "$RLVR_LAB_ROOT:/workspace" -b "$RLVR_BASE_PREFIX:$RLVR_BASE_PREFIX" \
+  -b "$RLVR_VLLM_RUNTIME_ROOT/evidence:/run-evidence" \
+  -b "$RLVR_VLLM_RUNTIME_ROOT/cache:/run-cache" \
+  -b "$RLVR_VLLM_RUNTIME_ROOT/wheelhouse:/wheelhouse" \
+  -b /root/dsh-harness:/harness \
+  ${MODELS_BIND[@]+"${MODELS_BIND[@]}"} -w /workspace \
+  /usr/bin/env -i \
+  PATH=/opt/rlvr-vllm-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  LD_LIBRARY_PATH=/opt/nvidia-driver \
+  LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+  HTTP_PROXY="${HTTP_PROXY:-}" HTTPS_PROXY="${HTTPS_PROXY:-}" ALL_PROXY="${ALL_PROXY:-}" NO_PROXY="${NO_PROXY:-}" \
+  http_proxy="${http_proxy:-}" https_proxy="${https_proxy:-}" all_proxy="${all_proxy:-}" no_proxy="${no_proxy:-}" \
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
+  OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}" MKL_NUM_THREADS="${MKL_NUM_THREADS:-8}" \
+  CC=/usr/bin/gcc CXX=/usr/bin/g++ \
+  PYTHONPATH=/workspace/src PYTHONDONTWRITEBYTECODE=1 \
+  PIP_CONFIG_FILE=/dev/null PIP_REQUIRE_VIRTUALENV=1 PIP_NO_INPUT=1 \
+  PIP_CACHE_DIR=/run-cache/pip HF_HOME=/run-cache/huggingface \
+  CUDA_CACHE_PATH=/run-cache/cuda TRITON_CACHE_DIR=/run-cache/triton \
+  TORCHINDUCTOR_CACHE_DIR=/run-cache/torchinductor VLLM_CACHE_ROOT=/run-cache/vllm \
+  ${OPTIONAL_ENV[@]+"${OPTIONAL_ENV[@]}"} \
+  "$@"

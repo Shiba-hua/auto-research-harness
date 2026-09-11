@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# 启动 harness 自己的 supervisord 实例（不用 /etc/supervisor，守住写入边界）
+set -u
+D=/root/dsh-harness
+mkdir -p "$D/logs" "$D/state"
+if [ -S "$D/state/supervisor.sock" ] && /usr/bin/supervisorctl -c "$D/supervisord.conf" pid >/dev/null 2>&1; then
+  echo "已在运行"; exit 0
+fi
+/usr/bin/supervisord -c "$D/supervisord.conf"
+echo "启动完成"

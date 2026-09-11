@@ -1,0 +1,88 @@
+# ══════════════════════════════════════════════════════════════════════
+# auto-research-harness · on-server profile patch
+# 见 docs/07-技术方案.md、docs/08-验收与交付计划.md、docs/09-研究员推理栈方案.md
+# ══════════════════════════════════════════════════════════════════════
+
+# ── 本地推理平面：两个端点、两个模型 ─────────────────────────────────
+# 值班员在小端点常驻（CPU），研究员在大端点按需（GPU）。两者都是 OpenAI 兼容。
+- id: llm-pi-ai
+  config:
+    providers:
+      guard:
+        displayName: 值班员 · MiniCPM5-2B（CPU 常驻）
+        api: openai-completions
+        baseURL: http://127.0.0.1:18099/v1
+        defaultContextWindow: 32768
+        defaultMaxTokens: 4096
+        models:
+          - id: minicpm5-2b
+            name: MiniCPM5-2B IQ4_XS（值班员，CPU 常驻 :18099）
+            contextWindow: 32768
+            reasoningEfforts: false
+      researcher:
+        displayName: 研究员 · Qwen3-32B-AWQ（GPU 按需）
+        api: openai-completions
+        baseURL: http://127.0.0.1:18001/v1
+        defaultContextWindow: 40960
+        defaultMaxTokens: 8192
+        models:
+          - id: qwen3-32b
+            name: Qwen3-32B-AWQ（研究员，GPU 按需 :18001）
+            contextWindow: 40960
+            reasoningEfforts: false
+
+# ── 顶层会话模型 = 值班员（小模型永远在，保证有人应答）───────────────
+- id: agent-default-model
+  config:
+    provider: guard
+    model: minicpm5-2b
+
+# ── 研究员子代理：值班员的唯一自主出口 ───────────────────────────────
+# 值班员只决定"是否唤醒研究员"；模型与人格由这里钉死，它无法选别的模型。
+- id: tool-subagent
+  disabled: false
+  config:
+    provider: spawn
+    toolName: researcher
+    backgroundMode: continuable
+    maxDepth: 0
+    agentOptions:
+      provider: researcher
+      model: qwen3-32b
+      maxTokens: 16384
+
+# ── lab 工具（MCP stdio）：13 个工具注册为 mcp__lab__* ────────────────
+# 注意：新增条目必须放进 insert: 块（裸 `- id:` 只用于修改已存在的条目）。
+- insert:
+    - id: mcp-lab
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: lab
+        transport: stdio
+        command: /root/vllm018-conda/bin/python3.11
+        args:
+          - /root/dsh-harness/mcp/lab_server.py
+
+# ── 权限：本机无 bwrap/landlock，OS 级沙箱不可用 ─────────────────────
+# 护栏改由两层承担：文件层 dsh-fs-sandbox（in-process 路径判定）
+# + 命令层 guarded_bash（白名单放行 / 黑名单拒绝 / 含元字符转审批）。
+- id: permission
+  config:
+    defaultPreset: guarded-full
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      guarded-full:
+        sandbox: danger-full-access
+        approval: ask
+        name: 受护栏的全权访问
+        description: 本机无 OS 级沙箱；写入仍受 dsh-fs-sandbox 路径策略约束，命令走 guarded_bash 三态判定。
+
+# ── 会话工作目录 = harness 的家（lab 只读可达）───────────────────────
+- id: fs-sandbox
+  config:
+    cwd: /root/dsh-harness
