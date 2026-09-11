@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# 容器重启后恢复模型（/dev/shm 是 tmpfs，重启即空）
+# 值班员模型已持久化在 /root/dsh-harness/models/；研究员需要重新下载。
+set -u
+D=/root/dsh-harness
+mkdir -p /dev/shm/models /dev/shm/spec/mcpm
+
+# 值班员：从持久副本恢复
+if [ ! -f /dev/shm/spec/mcpm/MiniCPM5-2B-IQ4_XS.gguf ]; then
+  if [ -f "$D/models/MiniCPM5-2B-IQ4_XS.gguf" ]; then
+    cp "$D/models/MiniCPM5-2B-IQ4_XS.gguf" /dev/shm/spec/mcpm/
+    echo "值班员模型已恢复"
+  else
+    echo "警告：持久副本也不存在，需重新获取 MiniCPM5-2B-IQ4_XS.gguf"; exit 1
+  fi
+fi
+
+# 研究员：重新下载（19G 放不进持久盘，只能重下）
+if [ ! -d /dev/shm/models/Qwen3-32B-AWQ ]; then
+  echo "研究员模型缺失，开始下载（约 7 分钟，19G）..."
+  HF_ENDPOINT=https://hf-mirror.com "$D/bin/vllm-run" python - <<PY
+from huggingface_hub import snapshot_download
+snapshot_download(repo_id="Qwen/Qwen3-32B-AWQ", local_dir="/models/Qwen3-32B-AWQ", max_workers=8)
+PY
+fi
+echo "模型就绪"

@@ -60,6 +60,12 @@ start_researcher() {
 
 gpu_used() { nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | tr -d ' ' || echo 99999; }
 
+# 容器重启后 /dev/shm 是空的：值班员模型从持久副本恢复，研究员模型按需重下。
+if [ ! -f /dev/shm/spec/mcpm/MiniCPM5-2B-IQ4_XS.gguf ]; then
+  log "duty-officer model missing (tmpfs wiped?) -> restoring"
+  "$D/bin/restore-models" >> "$LOG" 2>&1 || true
+fi
+
 log "watchdog up (interval ${INTERVAL}s)"
 while true; do
   # 值班员：CPU 常驻，必须一直在
