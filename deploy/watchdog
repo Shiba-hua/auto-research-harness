@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# 存活看护（watchdog）
+#
+# 为什么需要它：supervisor 能可靠跟踪普通进程，但跟踪不了 PRoot 的子进程模型
+# —— 实测 supervisor 会停在 stale PID（报 Running 而进程已不存在），guard 与 dsh 各复现一次。
+# 所以分两层：supervisor 看护这个普通 bash 进程；这个进程看护三个 PRoot 服务。
+#
+# 判活标准：TCP 上能拿到任意 HTTP 状态码（401/404 都算活着），"000" 才算死。
+set -u
+
+D=/root/dsh-harness
+LOG="$D/logs/watchdog.log"
+INTERVAL=${WATCHDOG_INTERVAL:-30}
+
+log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$LOG"; }
+
+# 返回 HTTP 状态码；连接失败时 curl 自己会打印 000。
+# 注意：不能用 `cmd || echo 000` —— curl 失败时已输出 000，会拼成 "000000"，
+# 导致 alive() 判定 "000000" != "000" 而误判为活着（这个 bug 实测让看门狗从不重启）。
+code() {
+  local c
+  c=$(curl -s -o /dev/null -w "%{http_code}" --max-time 6 "$1" 2>/dev/null)
+  printf '%s' "${c:-000}"
+}
+
+alive() { [ "$(code "$1")" != "000" ]; }
+
+pids_of() { ps -eo pid,cmd | awk -v p="$1" 'index($0,p)>0 && $1!='$$' {print $1}'; }
+
+kill_pat() {
+  local pids
+  pids=$(pids_of "$1")
+  [ -n "$pids" ] && { log "kill [$1] -> $(echo $pids | tr '\n' ' ')"; kill -TERM $pids 2>/dev/null; sleep 8; kill -9 $pids 2>/dev/null; }
+  return 0
+}
+
+start_guard() {
+  log "start guard"
+  setsid nohup "$D/bin/guard-run" -m /dev/shm/spec/mcpm/MiniCPM5-2B-IQ4_XS.gguf \
+    --host 127.0.0.1 --port 18099 -t 12 -c 32768 --jinja -fa on --reasoning off --alias minicpm5-2b \
+    >> "$D/logs/guard.log" 2>&1 < /dev/null &
+}
+
+start_dsh() {
+  log "start dsh"
+  setsid nohup "$D/bin/dsh-run" dsh --profile web --port 18080 --host 127.0.0.1 --no-open \
+    >> "$D/logs/dsh.log" 2>&1 < /dev/null &
+}
+
+# 研究员的按需拉起。MCP 工具（跑在 dsh 的 PRoot guest 里）无法嵌套 PRoot，
+# 所以它写 state/researcher.request，由这里的宿主进程真正启动。
+start_researcher() {
+  log "start researcher (vllm 32B)"
+  setsid nohup "$D/bin/vllm-run" vllm serve /models/Qwen3-32B-AWQ \
+    --served-model-name researcher --host 127.0.0.1 --port 18001 \
+    --max-model-len 40960 --gpu-memory-utilization 0.92 \
+    --enable-auto-tool-choice --tool-call-parser hermes \
+    >> "$D/logs/researcher.log" 2>&1 < /dev/null &
+}
+
+gpu_used() { nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | tr -d ' ' || echo 99999; }
+
+log "watchdog up (interval ${INTERVAL}s)"
+while true; do
+  # 值班员：CPU 常驻，必须一直在
+  if ! alive "http://127.0.0.1:18099/v1/models"; then
+    log "guard DOWN -> restart"
+    kill_pat "llama-server --host"
+    sleep 2
+    start_guard
+    sleep 25
+  fi
+
+  # DSH：Web 入口，必须一直在
+  if ! alive "http://127.0.0.1:18080/"; then
+    log "dsh DOWN -> restart"
+    kill_pat "node /opt/node24/bin/dsh --profile web"
+    sleep 3
+    start_dsh
+    sleep 45
+  fi
+
+  # 研究员：按需。收到请求文件才拉起，且必须 GPU 空闲（与训练互斥）。
+  if [ -f "$D/state/researcher.request" ]; then
+    U=$(gpu_used)
+    if alive "http://127.0.0.1:18001/v1/models"; then
+      log "researcher requested but already up"
+    elif [ "${U:-99999}" -lt 1000 ]; then
+      log "researcher requested -> start (gpu ${U} MiB)"
+      start_researcher
+    else
+      log "researcher requested but GPU busy (${U} MiB) -> refuse"
+    fi
+    rm -f "$D/state/researcher.request"
+  fi
+
+  sleep "$INTERVAL"
+done

@@ -12,6 +12,11 @@
         displayName: 值班员 · MiniCPM5-2B（CPU 常驻）
         api: openai-completions
         baseURL: http://127.0.0.1:18099/v1
+        # 值班员是路由/值守角色，不需要思维链。
+        # 实测：开着思考时有 5/12 的说法根本不发出工具调用（思考块吃光 token）；
+        # 关掉后 3/4 恢复正确。--reasoning off 服务端开关实测无效，必须走请求级 kwargs。
+        chatTemplateKwargs:
+          enable_thinking: false
         defaultContextWindow: 32768
         defaultMaxTokens: 4096
         models:
@@ -68,7 +73,7 @@
 # + 命令层 guarded_bash（白名单放行 / 黑名单拒绝 / 含元字符转审批）。
 - id: permission
   config:
-    defaultPreset: guarded-full
+    defaultPreset: auto-approve
     presets:
       read-only:
         sandbox: read-only
@@ -76,11 +81,16 @@
       workspace-write:
         sandbox: workspace-write
         approval: ask
+      auto-approve:
+        sandbox: workspace-write
+        approval: ask
+        name: 自动审批（安全员）
+        description: 安全员逐次预判沙箱越界 —— 安全自动放行，删除/凭据/远程/系统/批量五类硬风险永远转人工。
       guarded-full:
         sandbox: danger-full-access
         approval: ask
         name: 受护栏的全权访问
-        description: 本机无 OS 级沙箱；写入仍受 dsh-fs-sandbox 路径策略约束，命令走 guarded_bash 三态判定。
+        description: 本机无 OS 级沙箱；写入改由 guarded_bash / lab 工具自行把关。
 
 # ── 会话工作目录 = harness 的家（lab 只读可达）───────────────────────
 - id: fs-sandbox

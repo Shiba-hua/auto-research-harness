@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# 干净重启 DSH：按 cmd 精确定位，排除本脚本自身，避免 pgrep/pkill 自匹配。
+set -u
+D=/root/dsh-harness
+SELF=$$
+pids=$(ps -eo pid,cmd | awk -v me="$SELF" "/node .*dsh --profile web/ && \$1 != me {print \$1}")
+[ -n "$pids" ] && { echo "  停掉旧 DSH: $(echo $pids|tr "\n" " ")"; kill -TERM $pids 2>/dev/null; sleep 6; kill -9 $pids 2>/dev/null; }
+sleep 2
+: > "$D/logs/dsh.log"
+setsid nohup "$D/bin/dsh-run" dsh --profile web --port 18080 --host 127.0.0.1 --no-open > "$D/logs/dsh.log" 2>&1 < /dev/null &
+for i in $(seq 1 40); do
+  curl -sf -o /dev/null --max-time 4 http://127.0.0.1:18080/ && { echo "  ✅ 就绪 (${i}×3s)"; exit 0; }
+  sleep 3
+done
+echo "  ⚠️ 未就绪"; grep -m2 -E "Error" "$D/logs/dsh.log"

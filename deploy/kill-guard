@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# 清掉所有值班员实例（含孤儿、proot 对），让看门狗用当前参数重新拉起唯一一个。
+set -u
+pids=$(ps -eo pid,args | awk "/MiniCPM5-2B-IQ4_XS/ && !/awk/ {print \$1}")
+echo "  目标: $(echo $pids | tr "\n" " ")"
+[ -n "$pids" ] && kill -9 $pids 2>/dev/null
+# 顺带清掉为值班员而起、现已无子的 proot
+for p in $(ps -eo pid,args | awk "/rlvr-vllm0102-userspace-v3\/bin\/proot/ && !/awk/ {print \$1}"); do
+  n=$(pgrep -P "$p" 2>/dev/null | wc -l)
+  [ "$n" -eq 0 ] && kill -9 "$p" 2>/dev/null
+done
+exit 0

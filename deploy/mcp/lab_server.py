@@ -336,6 +336,75 @@ def t_req_cancel(a):
     return {"ok": True, "id": rid, "status": "cancelled"}
 
 
+# ---- on-demand researcher (GPU arbitration) --------------------------------
+#
+# 为什么不能直接由这里启动 vLLM：本服务器跑在 dsh-run 的 PRoot guest 内，
+# 再调 vllm-run 就是嵌套 PRoot —— 实测失败（内层 proot 二进制不可见）。
+# 所以用请求文件：本进程写 state/researcher.request，宿主上的看门狗负责拉起。
+# 两边都能看到 /root/dsh-harness/state/（guest 有该路径的 bind）。
+
+import urllib.request
+
+REQ_FILE = os.path.join(HARNESS, "state", "researcher.request")
+STATUS_FILE = os.path.join(HARNESS, "state", "researcher.status")
+RESEARCHER_URL = "http://127.0.0.1:18001/v1/models"
+
+
+def _http_code(url, timeout=4):
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception:                                          # noqa: BLE001
+        return 0
+
+
+def _researcher_ready():
+    return _http_code(RESEARCHER_URL) not in (0,)
+
+
+def t_researcher_status(a):
+    ready = _researcher_ready()
+    st = read_json(STATUS_FILE, {}) or {}
+    return {"ok": True, "ready": ready, "port": 18001,
+            "gpu": gpu_now(), "vllm_pids": vllm_pids(),
+            "last_request": st,
+            "note": "ready=true 表示研究员已在服务，可以派活"}
+
+
+def t_researcher_up(a):
+    """按需拉起研究员（vLLM）。GPU 不空闲则知情拒绝，不擅自抢占。"""
+    g = gpu_now()
+    if not g.get("ok"):
+        return {"ok": False, "error": "无法读取 GPU 状态"}
+    if _researcher_ready():
+        return {"ok": True, "action": "already_up", "gpu": g}
+
+    # GPU 被别的进程占着 → 知情拒绝（研究员与训练不能共存）
+    if g["used_mib"] >= 1000:
+        return {"action": "refused", "ok": False,
+                "why": "研究员与训练不能共存：当前显存已用 %d MiB，起研究员会 OOM" % g["used_mib"],
+                "gpu": g,
+                "options": ["A. 排队等待，稍后再试",
+                            "B. 中止占用者（lab_abort，会作废正在跑的实验）"]}
+
+    os.makedirs(os.path.dirname(REQ_FILE), exist_ok=True)
+    with open(REQ_FILE, "w") as f:
+        f.write(jdump({"requested_at": time.time(), "by": "researcher_up"}))
+    deadline = time.time() + int(a.get("wait_seconds", 240))
+    while time.time() < deadline:
+        if _researcher_ready():
+            break
+        time.sleep(5)
+    ready = _researcher_ready()
+    return {"ok": ready, "action": "started" if ready else "timeout",
+            "ready": ready, "waited_s": int(time.time() - (deadline - int(a.get("wait_seconds", 240)))),
+            "gpu": gpu_now(), "vllm_pids": vllm_pids(),
+            "message": ("研究员已就绪（Qwen3-32B-AWQ, :18001）" if ready
+                        else "已发出启动请求但超时未就绪；用 researcher_status 复查")}
+
+
 # ---- guarded bash (the bash guardrail) ----
 
 WHITELIST = {
@@ -399,22 +468,126 @@ def t_guarded_bash(a):
             "rc": rc, "stdout": out[-8000:], "stderr": err[-2000:]}
 
 
-# ---- plotting ----
+# ---- plotting -------------------------------------------------------------
+#
+# 本服务器运行在 dsh-run 的 PRoot guest 内，该 guest 里：
+#   /opt/rlvr-vllm-venv/bin/python   有 matplotlib 3.10.3
+#   <LAB>/src                        有 rlvr_lab
+# 所以直接用子进程调用 lab 已验证的绘图代码，不执行任何模型生成的代码。
+
+GUEST_PY = "/opt/rlvr-vllm-venv/bin/python"
+LAB_SRC = os.path.join(LAB, "src")
+PLOT_OUT = os.path.join(HARNESS, "evidence", "plots")
+
+
+def _run_guest_py(code, timeout=300):
+    env = dict(os.environ)
+    env["PYTHONPATH"] = LAB_SRC + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env["MPLBACKEND"] = "Agg"
+    env["MPLCONFIGDIR"] = "/tmp/mplcfg"
+    try:
+        p = subprocess.run([GUEST_PY, "-c", code], stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, timeout=timeout, env=env)
+        return (p.returncode, p.stdout.decode("utf-8", "replace"),
+                p.stderr.decode("utf-8", "replace"))
+    except Exception as e:                                     # noqa: BLE001
+        return (127, "", repr(e))
+
+
+def _img_block(path):
+    with open(path, "rb") as f:
+        import base64
+        return {"type": "image", "data": base64.b64encode(f.read()).decode("ascii"),
+                "mimeType": "image/png"}
+
 
 def t_plot_metrics(a):
+    """渲染某个 run 的标准诊断图。调用 lab 已验证的 rlvr_lab.plot.render()。"""
     rid = str(a.get("run_id", "")).strip()
-    d = os.path.join(LAB, "results", rid)
-    if not os.path.isdir(d):
-        return {"ok": False, "error": "找不到 run 目录: %s" % d}
-    script = os.path.join(LAB, "src", "rlvr_lab", "plot.py")
-    return {"ok": False, "pending": True,
-            "message": "plot_metrics 需要先接线 lab 的 plot.render()（已定位入口）",
-            "entry": script, "exists": os.path.isfile(script)}
+    if not rid:
+        return {"ok": False, "error": "run_id 必填"}
+    run = safe_join(os.path.join(LAB, "results"), rid)
+    if not os.path.isdir(run):
+        return {"ok": False, "error": "找不到 run 目录: %s" % run}
+    if not os.path.isfile(os.path.join(run, "metrics.jsonl")):
+        return {"ok": False,
+                "error": ("该目录没有 metrics.jsonl，不是训练 run（可能是概览/聚合目录）。"
+                          "可用 lab_run_list 找有遥测的 run。")}
+    out = safe_join(PLOT_OUT, rid)
+    os.makedirs(out, exist_ok=True)
+    code = (
+        "import json,sys\n"
+        "from rlvr_lab import plot as P\n"
+        "r = P.render(%r, %r)\n"
+        "print(json.dumps({'charts':[c if isinstance(c,str) else c.get('name') for c in r['charts']],"
+        "'warnings':r.get('warnings',[])}))\n" % (run, out)
+    )
+    rc, so, se = _run_guest_py(code, timeout=int(a.get("timeout", 300)))
+    if rc != 0:
+        return {"ok": False, "error": "渲染失败", "stderr": se[-800:]}
+    try:
+        info = json.loads(so.strip().splitlines()[-1])
+    except Exception:                                          # noqa: BLE001
+        return {"ok": False, "error": "无法解析渲染结果", "stdout": so[-400:]}
+    kinds = a.get("kinds") or info.get("charts") or []
+    if kinds == ["all"]:
+        kinds = info.get("charts") or []
+    blocks = []
+    shown = []
+    for k in kinds:
+        for ext in (".png",):
+            p = os.path.join(out, k + ext)
+            if os.path.isfile(p):
+                blocks.append(_img_block(p))
+                shown.append(k + ext)
+    summary = {"ok": True, "run_id": rid,
+               "charts_available": info.get("charts"),
+               "images_shown": shown,
+               "output_dir": out,
+               "warnings": info.get("warnings")}
+    return {"_content": [{"type": "text", "text": jdump(summary)}] + blocks}
 
 
 def t_plot_series(a):
-    return {"ok": False, "pending": True,
-            "message": "plot_series 尚未实现（薄封装通用折线）"}
+    """任意 X-Y 折线：从 run 的 JSONL 里取列，出图。补 lab 硬编码面板没有的视角。"""
+    rid = str(a.get("source", a.get("run_id", ""))).strip()
+    xk = str(a.get("x", "step")).strip()
+    yk = a.get("y") or []
+    if isinstance(yk, str):
+        yk = [yk]
+    if not rid or not yk:
+        return {"ok": False, "error": "需要 source(=run_id) 与 y(至少一个列名)"}
+    run = safe_join(os.path.join(LAB, "results"), rid)
+    fn = a.get("file", "metrics.jsonl")
+    src = safe_join(run, fn)
+    if not os.path.isfile(src):
+        return {"ok": False, "error": "找不到数据文件: %s" % src}
+    out = safe_join(PLOT_OUT, rid)
+    os.makedirs(out, exist_ok=True)
+    name = str(a.get("output", "series"))[:60].replace("/", "_")
+    png = os.path.join(out, name + ".png")
+    params = jdump({"src": src, "x": xk, "y": yk, "png": png, "title": rid})
+    helper = os.path.join(HARNESS, "mcp", "plot_series.py")
+    env = dict(os.environ)
+    env["MPLBACKEND"] = "Agg"
+    env["MPLCONFIGDIR"] = "/tmp/mplcfg"
+    try:
+        p = subprocess.run([GUEST_PY, helper, params], stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, timeout=int(a.get("timeout", 180)), env=env)
+    except Exception as e:                                     # noqa: BLE001
+        return {"ok": False, "error": "绘图进程异常: %r" % (e,)}
+    if p.returncode != 0:
+        return {"ok": False, "error": "绘图失败",
+                "stderr": p.stderr.decode("utf-8", "replace")[-600:]}
+    try:
+        info = json.loads(p.stdout.decode("utf-8", "replace").strip().splitlines()[-1])
+    except Exception:                                          # noqa: BLE001
+        info = {}
+    if not info.get("plotted"):
+        return {"ok": False, "error": "指定的列在数据里没有数值", "detail": info}
+    return {"_content": [{"type": "text", "text": jdump(
+        {"ok": True, "run_id": rid, "x": xk, "y": info.get("plotted"),
+         "rows": info.get("rows"), "png": png})}, _img_block(png)]}
 
 
 # ----------------------------------------------------------------------------- registry
@@ -430,10 +603,15 @@ TOOLS = [
     ("lab_gap", "盘点八阶段曲线协议的缺口（只读）", {}, t_lab_gap),
     ("lab_abort", "中止研究员推理服务并释放显存；返回显存释放凭证（确定性规则，不经模型）",
      {"confirm": {"type": "boolean"}}, t_lab_abort),
+    ("researcher_up", "按需拉起研究员（Qwen3-32B-AWQ, :18001）。GPU 不空闲则知情拒绝，不擅自抢占",
+     {"wait_seconds": {"type": "integer"}}, t_researcher_up),
+    ("researcher_status", "查询研究员是否已就绪（只读）", {}, t_researcher_status),
     ("guarded_bash", "受护栏保护的通用命令执行：白名单放行 / 黑名单拒绝 / 含 shell 元字符一律转审批",
      {"command": {"type": "string"}, "timeout": {"type": "integer"}}, t_guarded_bash),
-    ("req_list", "列出请求队列（只读）", {}, t_req_list),
-    ("req_add", "向队列登记一条请求",
+    ("req_list", "查看待办队列里已登记了什么（只读，不执行任务）", {}, t_req_list),
+    ("req_add", "把一条待办【登记】进请求队列——只记录，不执行、也不去访问它。"
+                "用户说「记一下 / 记下来 / 帮我记 / 登记 / 加到队列 / 待会做 / 排个队」时用它，"
+                "后面的内容是待办文字，不要试图去完成它。",
      {"text": {"type": "string"}, "tier": {"type": "string"},
       "priority": {"type": "integer"}}, t_req_add),
     ("req_edit", "修改队列中 queued 状态的请求",
@@ -496,6 +674,10 @@ def handle(msg):
         except Exception as e:                                 # noqa: BLE001
             res = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
             is_err = True
+        # 富内容：工具可返回 {"_content":[...]} 携带图片等 MCP 内容块
+        if isinstance(res, dict) and "_content" in res:
+            return {"jsonrpc": "2.0", "id": mid, "result": {
+                "content": res["_content"], "isError": bool(is_err)}}
         return {"jsonrpc": "2.0", "id": mid, "result": {
             "content": [{"type": "text", "text": jdump(res)}], "isError": bool(is_err)}}
     if method == "ping":
