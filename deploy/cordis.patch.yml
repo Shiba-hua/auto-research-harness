@@ -12,6 +12,10 @@
         displayName: 值班员 · MiniCPM5-2B（CPU 常驻）
         api: openai-completions
         baseURL: http://127.0.0.1:18099/v1
+        # 本地端点不校验 key，但 pi-ai 要求这个引用存在。
+        # dsh-credentials 的解析分层覆盖「进程环境变量」，空值视为缺席，
+        # 缺席时报 "No API key for provider: guard"。真实值由 dsh-run 注入。
+        apiKeyEnv: LOCAL_LLM_KEY
         # 值班员是路由/值守角色，不需要思维链。
         # 实测：开着思考时有 5/12 的说法根本不发出工具调用（思考块吃光 token）；
         # 关掉后 3/4 恢复正确。--reasoning off 服务端开关实测无效，必须走请求级 kwargs。
@@ -28,6 +32,7 @@
         displayName: 研究员 · Qwen3-32B-AWQ（GPU 按需）
         api: openai-completions
         baseURL: http://127.0.0.1:18001/v1
+        apiKeyEnv: LOCAL_LLM_KEY
         defaultContextWindow: 40960
         defaultMaxTokens: 8192
         models:

@@ -30,4 +30,5 @@ exec "$RR/bin/proot" -0 -r "$RR/rootfs" \
     PATH=/opt/node24/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin \
     HOME=/root LANG=C.UTF-8 LC_ALL=C.UTF-8 TERM=xterm \
     NODE_NO_WARNINGS=1 \
+    LOCAL_LLM_KEY=local-noauth \
     "$@"
