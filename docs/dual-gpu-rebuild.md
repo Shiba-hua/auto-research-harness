@@ -166,3 +166,38 @@ llama.cpp 需 **CUDA 版**才能 `-ngl` 卸载。
 
 > DSpark 要区分来源：RedHatAI 版架构名 `Qwen3DSparkModel` 直接命中 vLLM registry，开箱可用；
 > RadixArk 版走的是另一套实现。同名不同源。
+
+---
+
+## 9. `env -i` 白名单 —— 一个会反复咬人的坑（已复发两次）
+
+launcher 用 `/usr/bin/env -i` 构造纯净环境，**只传显式列出的变量**。
+任何"外部设了就该生效"的变量都会被静默丢掉，而且症状离原因很远。
+
+**已复发两次：**
+
+| 变量 | 症状 | 为什么会漏 |
+|---|---|---|
+| `VLLM_USE_FLASHINFER_SAMPLER=0` | vLLM 启动时找 nvcc 失败 | 我以为 export 了就传进去了 |
+| `LOCAL_LLM_KEY` | **DSH 界面选模型时报 `MISSING_CREDENTIAL`** | 配置里写了 `apiKeyEnv: LOCAL_LLM_KEY`，但环境里没有 |
+
+**规则**：launcher 里每加一个需要向下传递的变量，都要**同时改两处** ——
+① `guest` 的 `env -i` 列表（或在调用处显式展开），
+② 若有转发循环，也要加进循环名单。
+
+**排查口诀**：guest 里 `echo $VAR` 看到 "(未设置)"，就是白名单漏了，不要怀疑下游。
+
+### 9.1 界面报凭据错误时的完整检查链
+
+```
+界面选模型 → pi-ai 解析 apiKeyEnv → 从进程环境找该变量 → 找不到就 MISSING_CREDENTIAL
+```
+
+依次确认：
+
+1. `GR_EXTRA_BIND="/root/.dsh:/root/.dsh" bin/guest /bin/bash -c 'echo $LOCAL_LLM_KEY'` —— 有没有值
+2. `bin/dsh-run --profile web --dump-config | grep apiKeyEnv` —— 配置引用的变量名是否一致
+3. `bin/dsh-run --profile web --dump-config | grep -E "qwen|minicpm"` —— **模型 id 是否与后端实测一致**
+
+> 第 3 条同样咬过一次：配置里写着旧机的 `qwen3-32b`，而新研究员服务提供的是 `qwen3-8-27b`。
+> **重建机器后必须重新核对模型 id**，不能照抄旧配置。

@@ -30,5 +30,6 @@ exec $ROOT/downloads/proot -0 -r "$R" \
     PIP_CACHE_DIR=/dev/shm/pipcache \
     HF_HOME=/dev/shm/hf \
     HF_HUB_DISABLE_XET=1 \
+    LOCAL_LLM_KEY=${LOCAL_LLM_KEY:-local-noauth} \
     ${OPT[@]+"${OPT[@]}"} \
   "$@"
