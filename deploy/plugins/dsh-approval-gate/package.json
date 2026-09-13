@@ -1,0 +1,8 @@
+{
+  "name": "dsh-approval-gate",
+  "version": "0.3.0",
+  "private": true,
+  "description": "安全员：DSH approval/request 瀑布上的确定性策略审批插件（模型只能收紧，不能放松）",
+  "type": "module",
+  "main": "lib/index.js"
+}

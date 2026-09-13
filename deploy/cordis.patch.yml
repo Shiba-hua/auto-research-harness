@@ -16,18 +16,39 @@
         # dsh-credentials 的解析分层覆盖「进程环境变量」，空值视为缺席，
         # 缺席时报 "No API key for provider: guard"。真实值由 dsh-run 注入。
         apiKeyEnv: LOCAL_LLM_KEY
-        # 值班员是路由/值守角色，不需要思维链。
-        # 实测：开着思考时有 5/12 的说法根本不发出工具调用（思考块吃光 token）；
-        # 关掉后 3/4 恢复正确。--reasoning off 服务端开关实测无效，必须走请求级 kwargs。
-        chatTemplateKwargs:
-          enable_thinking: false
+        # 思考由「请求状态」驱动 —— 可在 UI 里切档，不再写死。
+        #
+        # 关键：chatTemplateKwargs 是 compat 的字段，不是 provider 的顶层字段。
+        # 早先写在顶层时 dsh-llm-pi-ai 根本不读它（也因此绕过了 index.js:685
+        # 的 "no model on the route speaks it" 校验），属静默失效：
+        # llama.cpp 的 chat template 默认开着思考，于是每轮白烧 ~40 token。
+        # 实测判据（同一问题、同一模型）：
+        #   不传 chat_template_kwargs → 43 token、reasoning_content 60 字符
+        #   传 enable_thinking=false  →  2 token、无 reasoning_content
+        #
+        # thinkingFormat 必须是 chat-template 系，pi-ai 才会把 $var 解析为
+        # chat_template_kwargs.enable_thinking 布尔值（dist/api/openai-completions.js:798）。
+        compat:
+          thinkingFormat: chat-template
+          chatTemplateKwargs:
+            enable_thinking:
+              $var: thinking.enabled
+              # llama.cpp 默认开思考，所以"关"必须显式发 false，不能靠省略。
+              omitWhenOff: false
         defaultContextWindow: 32768
         defaultMaxTokens: 4096
         models:
           - id: minicpm5-2b
             name: MiniCPM5-2B IQ4_XS（值班员，CPU 常驻 :18099）
             contextWindow: 32768
-            reasoningEfforts: false
+            # 可调档位 —— 声明后 UI 会给出选择器。
+            # MiniCPM5-2B 的模板只有 enable_thinking 这一个布尔开关，
+            # 没有真正的"思考预算"，因此只提供 off / medium 两档：
+            # 任何非 off 档都等价于「开」。非 off 档的线值此处不被使用
+            # （只有 thinking.enabled 被读），但校验要求它非空。
+            reasoningEfforts:
+              off:
+              medium: medium
       researcher:
         displayName: 研究员 · Qwen3-32B-AWQ（GPU 按需）
         api: openai-completions
@@ -87,7 +108,19 @@
         sandbox: workspace-write
         approval: ask
       auto-approve:
-        sandbox: workspace-write
+        # 必须是 danger-full-access，不能是 workspace-write。
+        # 本机（内核 5.10 + glibc 2.27）既无 bubblewrap 也无 Landlock
+        # （Landlock 需 5.13+），dsh-sandbox 因此无法兑现 workspace-write，
+        # 会对**每一次** bash 调用硬失败：
+        #   'sandbox mode "workspace-write" is requested but no sandbox backend
+        #    is usable on this host; refusing to run the command unconfined.'
+        # 后果是值班员陷在工具报错重试循环里（实测同一失败调用连试 4 次）。
+        # dsh-sandbox 自己的诊断也建议改用它：
+        #   'otherwise switch the consumer to danger-full-access.'
+        # 安全性由另外两层承担，不靠 OS 沙箱：
+        #   1) 审批层 —— approval: ask，安全员（dsh-approval-gate）逐次裁决
+        #   2) 命令层 —— mcp__lab__guarded_bash（白名单放行/黑名单拒绝/元字符转审批）
+        sandbox: danger-full-access
         approval: ask
         name: 自动审批（安全员）
         description: 安全员逐次预判沙箱越界 —— 安全自动放行，删除/凭据/远程/系统/批量五类硬风险永远转人工。
@@ -101,3 +134,12 @@
 - id: fs-sandbox
   config:
     cwd: /root/dsh-harness
+
+# --- safety officer: deterministic approval policy on approval/request ---
+# Model can only tighten, never loosen; internal errors fail closed to human.
+- insert:
+    - id: approval-gate
+      name: dsh-approval-gate
+      config:
+        modelReview: true
+        neutralThreshold: 3
