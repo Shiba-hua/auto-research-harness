@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# 通用 PRoot guest 入口。用法: guest <cmd...>
+# 环境变量 GR_EXTRA_BIND (可重复) / GR_HOME_SHM=1 可调。
+set -euo pipefail
+ROOT=/root/dsh-harness
+R=$ROOT/proot-rootfs
+CONDA=/root/vllm018-conda
+[[ $# -gt 0 ]] || { echo "Supply a guest command." >&2; exit 2; }
+OPT=()
+for v in HF_ENDPOINT VLLM_USE_V1 VLLM_USE_FLASHINFER_SAMPLER VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS CUDA_VISIBLE_DEVICES; do
+  eval "val=\${$v:-}"; [ -n "$val" ] && OPT+=("$v=$val")
+done
+BIND=()
+for b in ${GR_EXTRA_BIND:-}; do BIND+=(-b "$b"); done
+exec $ROOT/downloads/proot -0 -r "$R" \
+  -b "$R:$R" \
+  -b /dev -b /proc -b /sys -b /etc/resolv.conf -b /etc/hosts \
+  -b "$CONDA:$CONDA" \
+  -b "$ROOT:$ROOT" \
+  -b /dev/shm:/dev/shm \
+  -b "$ROOT/nvidia-driver:/opt/nvidia-driver" \
+  -b /usr/bin/nvidia-smi:/usr/bin/nvidia-smi \
+  "${BIND[@]}" \
+  -w /root/dsh-harness \
+  /usr/bin/env -i \
+    PATH=/opt/vllm025-venv/bin:/opt/node24/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    HOME=/root LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+    LD_LIBRARY_PATH=/opt/nvidia-driver \
+    PYTHONUNBUFFERED=1 \
+    PIP_CACHE_DIR=/dev/shm/pipcache \
+    HF_HOME=/dev/shm/hf \
+    HF_HUB_DISABLE_XET=1 \
+    ${OPT[@]+"${OPT[@]}"} \
+  "$@"

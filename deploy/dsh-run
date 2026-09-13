@@ -1,34 +1,8 @@
 #!/usr/bin/env bash
-# DSH 上线器：把 DSH 跑在 PRoot userspace 里。
-#
-# 为什么必须这样：DSH 的两个原生模块要 GLIBC>=2.28，而宿主只有 2.27 ——
-#   @img/sharp-linux-x64  -> libvips-cpp.so 需 GLIBC_2.28  （图片显示，验收区块 2 依赖它）
-#   node-pty              -> pty.node       需 GLIBC_2.28  （subprocess seam）
-# PRoot rootfs 是 Ubuntu 22.04（glibc 2.35），两者实测均 OK。
-#
-# 宿主本身一字未改。
+# DSH 上线器（在 PRoot guest 内跑，提供 glibc 2.35 给 sharp/node-pty）
+# 关键：必须把宿主 /root/.dsh 挂进 guest，否则 DSH 读的是 guest 自己的空 DSH_HOME，
+# 用户补丁层 cordis.patch.yml 会被完全忽略（dump-config 与 dump-default-config 零差异）。
 set -euo pipefail
-
-RR=${RLVR_VLLM_RUNTIME_ROOT:-/root/siton-tmp/rlvr-vllm0102-userspace-v3}
-L=/usr/lib/x86_64-linux-gnu
-LAB=/root/siton-tmp/rlvr-l40s-lab
-
-exec "$RR/bin/proot" -0 -r "$RR/rootfs" \
-  -b /dev -b /proc -b /sys -b /etc/resolv.conf -b /etc/hosts \
-  -b /opt/node24:/opt/node24 \
-  -b /root/.dsh:/root/.dsh \
-  -b /root/dsh-harness:/root/dsh-harness \
-  -b "$LAB:$LAB" \
-  -b /root/vllm018-conda:/root/vllm018-conda \
-  -b /root/llama.cpp:/root/llama.cpp \
-  -b /dev/shm:/dev/shm \
-  -b /usr/bin/nvidia-smi:/usr/bin/nvidia-smi \
-  -b "$L/libnvidia-ml.so.1:$L/libnvidia-ml.so.1" \
-  -b "$L/libnvidia-cfg.so.1:$L/libnvidia-cfg.so.1" \
-  -w /root/dsh-harness \
-  /usr/bin/env -i \
-    PATH=/opt/node24/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin \
-    HOME=/root LANG=C.UTF-8 LC_ALL=C.UTF-8 TERM=xterm \
-    NODE_NO_WARNINGS=1 \
-    LOCAL_LLM_KEY=local-noauth \
-    "$@"
+D=/root/dsh-harness
+export GR_EXTRA_BIND="/root/.dsh:/root/.dsh"
+exec $D/bin/guest /opt/node24/bin/dsh "$@"

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# DFlash2 实验：llama.cpp CUDA + Qwen3.8-27B GGUF + 官方 DFlash2 GGUF 草稿。
+# 用法: dflash2-run <base.gguf> <draft.gguf> <port> [--spec draft-dflash|none]
+set -uo pipefail
+D=/root/dsh-harness
+BASE="$1"; DRAFT="$2"; PORT="${3:-18003}"; SPEC="${4:-draft-dflash}"
+BIN=$D/build/llama.cpp/build-cuda/bin/llama-server
+NGPU=${DFLASH_GPU:-1}
+ARGS=(-m "$BASE" --host 127.0.0.1 --port "$PORT" -ngl 99 -fa on --jinja
+      -c 32768 -t 32 --alias qwen3-8-27b-gguf)
+if [ "$SPEC" != "none" ] && [ -n "$DRAFT" ]; then
+  ARGS+=(--spec-type "$SPEC" -md "$DRAFT" --spec-draft-ngl 99)
+fi
+echo "=== dflash2 boot: spec=$SPEC draft=$(basename ${DRAFT:-none}) gpu=$NGPU $(date -Is) ==="
+CUDA_VISIBLE_DEVICES=$NGPU exec $D/bin/guest "$BIN" "${ARGS[@]}"

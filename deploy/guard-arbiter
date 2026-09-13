@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# 值班员显存仲裁器：按 GPU 空闲显存决定 MiniCPM 跑 CPU 还是卸载到某张卡。
+# 状态文件记录当前模式，避免反复重启（抖动抑制）。
+set -uo pipefail
+D=/root/dsh-harness
+THRESH=${GUARD_VRAM_THRESH:-8000}      # 需要多少 MiB 空闲才敢上卡
+STATE=$D/state/guard-mode              # cpu | gpuN
+LOG=$D/logs/guard-arbiter.log
+mkdir -p $D/state
+log() { printf '%s %s\n' "$(date -Is)" "$*" | tee -a "$LOG"; }
+
+# 找空闲显存最多的卡
+BEST=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits \
+       | sort -t, -k2 -rn | head -1)
+BEST_IDX=$(echo "$BEST" | cut -d, -f1 | tr -d ' ')
+BEST_FREE=$(echo "$BEST" | cut -d, -f2 | tr -d ' ')
+
+CUR="cpu"; [ -f "$STATE" ] && CUR=$(cat "$STATE")
+
+if [ "$BEST_FREE" -ge "$THRESH" ]; then
+  TARGET="gpu$BEST_IDX"
+else
+  TARGET="cpu"
+fi
+
+if [ "$CUR" = "$TARGET" ]; then
+  echo "$(date -Is) noop cur=$CUR bestFree=${BEST_FREE}MiB" >> "$LOG"
+  exit 0
+fi
+
+log "switch $CUR -> $TARGET (best GPU$BEST_IDX free=${BEST_FREE}MiB, thresh=${THRESH}MiB)"
+# 停旧的值班员（llama-server 的 cmdline 含 --alias minicpm5-2b）
+for pid in $(pgrep -f "[a]lias minicpm5-2b" 2>/dev/null); do kill -TERM "$pid" 2>/dev/null; done
+sleep 3
+for pid in $(pgrep -f "[a]lias minicpm5-2b" 2>/dev/null); do kill -9 "$pid" 2>/dev/null; done
+
+if [ "$TARGET" = "cpu" ]; then
+  setsid nohup $D/bin/guard-run > $D/logs/guard.log 2>&1 < /dev/null &
+else
+  setsid nohup $D/bin/guard-run --gpu "$BEST_IDX" > $D/logs/guard.log 2>&1 < /dev/null &
+fi
+echo "$TARGET" > "$STATE"
+
+for i in $(seq 1 20); do
+  c=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 http://127.0.0.1:18099/v1/models 2>/dev/null); c=${c:-000}
+  [ "$c" = "200" ] && { log "  ready as $TARGET (probe $i)"; exit 0; }
+  sleep 3
+done
+log "  WARN: not ready after switch to $TARGET"

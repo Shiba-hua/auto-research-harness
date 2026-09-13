@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# 研究员：vLLM 0.25.0+cu129。
+# 已编入的坑：cu129 轮子 / VLLM_USE_FLASHINFER_SAMPLER=0 / max-num-seqs 压图捕获 /
+#             torchcodec 已移除 / 驱动库经 /opt/nvidia-driver 暴露。
+# 用法: researcher-run <model_dir> [--spec <json|file>] [--gpu N] [--len N] [--name N] [--port N]
+set -uo pipefail
+D=/root/dsh-harness
+M=""; SPEC=""; GPU=${RESEARCHER_GPU:-0}; LEN=${RESEARCHER_MAXLEN:-262144}
+NAME=${RESEARCHER_NAME:-qwen3-8-27b}; PORT=${RESEARCHER_PORT:-18001}; SEQ=${RESEARCHER_SEQS:-16}
+EXTRA=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --spec) SPEC="$2"; shift 2;;
+    --gpu) GPU="$2"; shift 2;;
+    --len) LEN="$2"; shift 2;;
+    --name) NAME="$2"; shift 2;;
+    --port) PORT="$2"; shift 2;;
+    --seqs) SEQ="$2"; shift 2;;
+    *) if [ -z "$M" ]; then M="$1"; else EXTRA+=("$1"); fi; shift;;
+  esac
+done
+[ -n "$M" ] || { echo "usage: researcher-run <model_dir> [--spec json|file] [--gpu N]" >&2; exit 2; }
+# spec 参数既可是文件路径也可是字面 JSON
+if [ -n "$SPEC" ] && [ -f "$SPEC" ]; then SPEC=$(cat "$SPEC"); fi
+ARGS=(/opt/vllm025-venv/bin/vllm serve "$M"
+      --served-model-name "$NAME" --host 127.0.0.1 --port "$PORT"
+      --max-model-len "$LEN" --gpu-memory-utilization 0.92 --trust-remote-code
+      --max-num-seqs "$SEQ" --limit-mm-per-prompt '{"image":0,"video":0}')
+[ -n "$SPEC" ] && ARGS+=(--speculative-config "$SPEC")
+echo "=== researcher boot: $(basename $M) gpu=$GPU name=$NAME port=$PORT len=$LEN $(date -Is) ==="
+echo "    spec=${SPEC:-none}"
+CUDA_VISIBLE_DEVICES=$GPU VLLM_USE_FLASHINFER_SAMPLER=0 \
+  exec $D/bin/guest "${ARGS[@]}" "${EXTRA[@]+"${EXTRA[@]}"}"
