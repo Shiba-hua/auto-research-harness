@@ -50,13 +50,55 @@ def sh(cmd, timeout=60, cwd=None):
         return (127, "", repr(e))
 
 
+GPU_IDLE_MIB = 1000          # 低于此视为「该卡空闲」
+RESEARCHER_NEED_MIB = 20000  # 起研究员至少需要这么多空闲显存
+
+
 def gpu_now():
-    rc, out, _ = sh("nvidia-smi --query-gpu=memory.used,memory.free,utilization.gpu "
-                    "--format=csv,noheader,nounits", timeout=20)
+    """按卡解析 GPU 状态。多卡安全。
+
+    返回 gpus[] 明细；used_mib/free_mib 是求和（兼容旧字段），
+    util_pct 取最忙那张；另给 idle_gpu / max_free_mib 供仲裁使用。
+    """
+    rc, out, _ = sh("nvidia-smi --query-gpu=index,memory.used,memory.free,"
+                    "memory.total,utilization.gpu --format=csv,noheader,nounits", timeout=20)
     if rc != 0:
-        return {"ok": False, "error": "nvidia-smi failed"}
-    used, free, util = [x.strip() for x in out.strip().split(",")[:3]]
-    return {"ok": True, "used_mib": int(used), "free_mib": int(free), "util_pct": int(util)}
+        return {"ok": False, "error": "nvidia-smi failed", "gpus": []}
+    gpus = []
+    for line in out.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 5:
+            continue
+        try:
+            gpus.append({
+                "index": int(parts[0]),
+                "used_mib": int(parts[1]),
+                "free_mib": int(parts[2]),
+                "total_mib": int(parts[3]),
+                "util_pct": int(parts[4]),
+            })
+        except ValueError:
+            continue
+    if not gpus:
+        return {"ok": False, "error": "no GPU rows parsed",
+                "raw": out.strip()[:200], "gpus": []}
+    idle = [g for g in gpus if g["used_mib"] < GPU_IDLE_MIB]
+    best = max(gpus, key=lambda g: g["free_mib"])
+    return {
+        "ok": True,
+        "gpus": gpus,
+        "count": len(gpus),
+        # 聚合（向后兼容旧字段名）
+        "used_mib": sum(g["used_mib"] for g in gpus),
+        "free_mib": sum(g["free_mib"] for g in gpus),
+        "total_mib": sum(g["total_mib"] for g in gpus),
+        "util_pct": max(g["util_pct"] for g in gpus),
+        # 仲裁用
+        "all_idle": len(idle) == len(gpus),
+        "idle_gpu": idle[0]["index"] if idle else None,
+        "max_free_mib": best["free_mib"],
+        "best_gpu": best["index"],
+    }
 
 
 def vllm_pids():
@@ -168,10 +210,11 @@ def _credential():
     """Release is proven only when VRAM is low AND no orphan remains."""
     u = gpu_now()
     left = vllm_pids()
-    issued = bool(u.get("ok")) and u["used_mib"] < 1000 and len(left) == 0
+    issued = bool(u.get("ok")) and bool(u.get("all_idle")) and len(left) == 0
     return {"issued": issued, "gpu_used_mib": u.get("used_mib"),
-            "gpu_free_mib": u.get("free_mib"), "leftover_pids": left,
-            "rule": "gpu_used_mib < 1000 AND leftover_pids == 0",
+            "gpu_free_mib": u.get("free_mib"), "gpus": u.get("gpus"),
+            "leftover_pids": left,
+            "rule": "ALL GPUs used_mib < %d AND leftover_pids == 0" % GPU_IDLE_MIB,
             "note": ("必须 SIGTERM guest 内的 vllm 宿主 PID；"
                      "杀 PRoot 包装进程只会把它孤儿化并继续占显存")}
 
@@ -381,10 +424,11 @@ def t_researcher_up(a):
     if _researcher_ready():
         return {"ok": True, "action": "already_up", "gpu": g}
 
-    # GPU 被别的进程占着 → 知情拒绝（研究员与训练不能共存）
-    if g["used_mib"] >= 1000:
+    # 没有一张卡够用 → 知情拒绝（研究员与训练不能共存）
+    if g.get("max_free_mib", 0) < RESEARCHER_NEED_MIB:
         return {"action": "refused", "ok": False,
-                "why": "研究员与训练不能共存：当前显存已用 %d MiB，起研究员会 OOM" % g["used_mib"],
+                "why": "没有 GPU 有足够空闲显存起研究员：最空闲的是 GPU%s（%d MiB），需要 %d MiB"
+                       % (g.get("best_gpu"), g.get("max_free_mib", 0), RESEARCHER_NEED_MIB),
                 "gpu": g,
                 "options": ["A. 排队等待，稍后再试",
                             "B. 中止占用者（lab_abort，会作废正在跑的实验）"]}

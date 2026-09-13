@@ -35,12 +35,12 @@
               $var: thinking.enabled
               # llama.cpp 默认开思考，所以"关"必须显式发 false，不能靠省略。
               omitWhenOff: false
-        defaultContextWindow: 32768
+        defaultContextWindow: 131072
         defaultMaxTokens: 4096
         models:
           - id: minicpm5-2b
             name: MiniCPM5-2B IQ4_XS（值班员，CPU 常驻 :18099）
-            contextWindow: 32768
+            contextWindow: 131072
             # 可调档位 —— 声明后 UI 会给出选择器。
             # MiniCPM5-2B 的模板只有 enable_thinking 这一个布尔开关，
             # 没有真正的"思考预算"，因此只提供 off / medium 两档：
@@ -143,3 +143,15 @@
       config:
         modelReview: true
         neutralThreshold: 3
+
+# --- web search: use modsearch (keyless), disable the DeepSeek-only provider ---
+# 07-技术方案.md 5.3: dsh-web-search-deepseek 只对 DeepSeek 后端有效;
+# 两个本地模型(值班员/研究员)用它必然是死的,且会与 modsearch 抢 tool 名。
+- id: web-search-deepseek
+  disabled: true
+# tool-web 在 base 里是 disabled 的,显式打开,让模型看到 web_search / web_fetch。
+- id: tool-web
+  disabled: false
+  config:
+    fetch: true
+    searchTimeoutMs: 60000

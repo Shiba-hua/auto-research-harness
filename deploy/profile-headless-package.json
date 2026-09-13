@@ -1,0 +1,17 @@
+{
+  "name": "dsh-profile-headless",
+  "private": true,
+  "dependencies": {
+    "@liustack/modsearch": "5.10.2"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-headless",
+        "@liustack/modsearch"
+      ],
+      "patchReload": "startup"
+    }
+  }
+}
