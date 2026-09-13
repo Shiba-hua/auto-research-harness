@@ -58,27 +58,55 @@ common_speculative_impl_draft_dflash: adding speculative implementation 'draft-d
   - block_size=8, mask_token_id=248070, n_extract=5, sample_from_anchor=true
 ```
 
-### 2.3 Qwen3.6-35B-A3B（MoE, FP8）· vLLM · 256k
+### 2.3 Qwen3.6-35B-A3B（MoE）· 两种框架两种草稿
+
+**vLLM（FP8, 256k 全上下文）**
 
 | 配置 | short | mid | long | 聚合 | 加速比 |
 |---|---|---|---|---|---|
 | 基线 | 101.25 | 102.67 | 86.01 | 98.31 | — |
 | **DSpark** | 115.88 | 106.72 | 73.38 | **100.75** | **1.02×（无实质加速）** |
 
-MoE 只激活 3B，本身已很快（约 100 tok/s），推测解码边际收益极小。
+**llama.cpp CUDA（GGUF UD-Q3_K_M, 32k）**
+
+| 配置 | short | mid（稳态） | long | 聚合 | 加速比 |
+|---|---|---|---|---|---|
+| 基线 | 147.00 | 144.68 | 33.47 | 116.77 | — |
+| **DFlash** | 192.59 | **180.73** | **107.18** | **162.44** | **聚合 1.39× / 稳态 1.25× / 长提示 3.20×** |
+
+**DFlash 接受率**（3 轮）：63.98% / 49.84% / 79.46%，**均值 63.98%**，平均接受长度 **2.90**。
+
+加载证据（`block_size=16, mask_token_id=248077, n_extract=8`，与 DFlash2 的 8/248070/5 明显不同，
+确认是 DFlash v1 的独立实现）：
+
+```
+common_speculative_impl_draft_dflash: adding speculative implementation 'draft-dflash'
+  - block_size=16, mask_token_id=248077, n_extract=8, sample_from_anchor=true
+```
+
+> ⚠️ **一个被数据推翻的预判。** 我先前根据 DSpark 的 1.02× 推断「MoE 只激活 3B，
+> 推测解码收益有限」，但 DFlash 在同一 MoE 上给出了 **1.39× 聚合、3.20× 长提示**。
+> 两者的差别在机制：DFlash 的块扩散草稿平均接受长度 2.90，而 DSpark 的收益被自身开销吃掉。
+> **同一基座上换一种推测解码机制，结论可以完全不同** —— 不能由一个草稿的表现外推另一个。
+>
+> 另外注意 MoE 的**长提示**场景：llama.cpp 基线只有 33.47 tok/s，DFlash 提升到 107.18 tok/s。
+> 说明推测解码在 prefill 占比高的长上下文里价值更大。
 
 ## 3. 三条草稿路线的可用性判定
 
-| 草稿 | vLLM 0.25.0 | llama.cpp | 结论 |
+| 草稿 | vLLM 0.25.0 | llama.cpp | 实测结论 |
 |---|---|---|---|
-| **原生 MTP** (`qwen3_5_mtp`) | 可用 | `draft-mtp` | **首选**：同源、零额外下载、稳态 1.51× |
-| **DFlash2** (z-lab) | 需未合并 PR #52816 | **可用**（`draft-dflash`） | llama.cpp 是正确路线，稳态 1.68× |
-| **DFlash** (z-lab, MoE) | 需未合并 PR #40898 | 可用 | vLLM 报错：`DFlash does not yet support mixed sliding/full attention via layer_types` |
+| **原生 MTP** (`qwen3_5_mtp`) | 可用 | `draft-mtp` | **首选**：同源、零额外下载；27B dense 稳态 **1.51×** |
+| **DFlash2** (z-lab, 27B dense) | 需未合并 PR #52816 | **可用**（`draft-dflash`） | llama.cpp 是正确路线；稳态 **1.68×** |
+| **DFlash** (z-lab, MoE) | 需未合并 PR #40898 | **可用**（`draft-dflash`） | MoE 上聚合 **1.39×** / 长提示 **3.20×** |
+| **DSpark** (RedHatAI, MoE) | **可用** | — | 同基座仅 **1.02×**（无实质加速） |
 | **DSpark** (RadixArk, 27B) | 不兼容 | `draft-dspark` | 绑定 DeepSeek-V4 的 `hc_mult`/`hc_eps`/`hc_sinkhorn_iters` 超连接 |
-| **DSpark** (RedHatAI, MoE) | **可用** | — | 用 vLLM Speculators 训练，但实测无加速 |
 
-> **DSpark 必须区分来源。** RedHatAI 版架构名 `Qwen3DSparkModel` 直接命中 vLLM registry，开箱可用；
-> RadixArk 版走的是另一套实现。同名不同源，不能一概而论。
+> **两个必须区分的点：**
+> 1. **DSpark 要区分来源。** RedHatAI 版架构名 `Qwen3DSparkModel` 直接命中 vLLM registry，开箱可用；
+>    RadixArk 版走的是另一套实现。同名不同源。
+> 2. **llama.cpp 是 DFlash 系的可行路线。** 两个 DFlash 变体在 vLLM 0.25.0 上各缺一个未合并 PR
+>    （#52816 DFlash2、#40898 DFlash），而在 llama.cpp 上都能直接跑，且实测加速明显。
 
 ## 4. 架构事实（实测，含对早期错误判断的更正）
 
